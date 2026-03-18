@@ -52,7 +52,7 @@ def execute_action(action: str, action_input: str, state: dict) -> str:
 
     elif action == "write_section":
         if "|" not in action_input:
-            return "[write_section error] Input must be: section_name|content"
+            return f"[write_section error] Missing pipe separator. You wrote: '{action_input}'. Correct format: financials|Revenue was £10bn in 2024. Profit was £3.2bn. Try again immediately with the pipe character."
         name, content = action_input.split("|", 1)
         write_section(state["memo_sections"], name.strip(), content.strip())
         return f"Section '{name.strip()}' written successfully."
@@ -63,6 +63,48 @@ def execute_action(action: str, action_input: str, state: dict) -> str:
     else:
         return f"[error] Unknown action: '{action}'. Use web_search, web_fetch, write_section, or finish."
 
+
+def summarise_memory(state: dict) -> dict:
+    """
+    Compress message history into a shorter summary every 5 steps.
+    Keeps context window manageable on long research tasks.
+    """
+    messages = state["messages"]
+    company = state["company"]
+    sections_done = list(state["memo_sections"].keys())
+
+    # Build a summary prompt
+    history_text = ""
+    for m in messages:
+        role = m["role"].upper()
+        history_text += f"{role}: {m['content'][:300]}\n\n"
+
+    summary_prompt = f"""You are summarising the research progress for a financial memo on {company}.
+
+Here is the research history so far:
+{history_text}
+
+Write a concise summary (max 200 words) covering:
+1. Key facts already found about {company}
+2. Sections already written: {sections_done}
+3. What still needs to be researched
+
+Be specific — include actual numbers and facts found."""
+
+    from langchain_core.messages import HumanMessage
+    response = _llm.invoke([HumanMessage(content=summary_prompt)])
+    summary = response.content
+
+    print(f"\n[memory] Summarised {len(messages)} messages into {len(summary)} chars")
+
+    # Replace message history with system prompt + compressed summary
+    state["messages"] = [
+        {"role": "user", "content": SYSTEM_PROMPT.format(company=company)},
+        {"role": "assistant", "content": "Understood. I will continue researching using the ReAct format."},
+        {"role": "user", "content": f"Research progress so far:\n{summary}\n\nContinue researching {company}. Remember to use the exact ReAct format: Thought / Action / Action Input."}
+    ]
+
+    return state
 
 def run_one_react_step(state: dict) -> dict:
     """
@@ -82,6 +124,11 @@ def run_one_react_step(state: dict) -> dict:
         messages = [
             {"role": "user", "content": SYSTEM_PROMPT.format(company=company)}
         ]
+
+    # Every 5 steps — compress memory to keep context window manageable
+    if state["step_count"] > 0 and state["step_count"] % 8 == 0:
+        state = summarise_memory(state)
+        messages = state["messages"]
 
     # Call Claude
     from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -117,6 +164,14 @@ def run_one_react_step(state: dict) -> dict:
     state["step_count"] = state["step_count"] + 1
 
     if observation == "FINISH":
-        state["finished"] = True
+        required = {"company_overview", "financials", "recent_news", "ai_initiatives", "analyst_sentiment"}
+        written = set(state["memo_sections"].keys())
+        missing = required - written
+        if missing:
+            # Agent tried to finish too early — force it to continue
+            print(f"[guard] Blocked early finish — missing sections: {missing}")
+            state["messages"][-1]["content"] = f"Observation: You cannot finish yet. Missing sections: {missing}. Continue researching."
+        else:
+            state["finished"] = True
 
     return state

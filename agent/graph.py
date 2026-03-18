@@ -2,7 +2,7 @@ from typing import TypedDict
 from langgraph.graph import StateGraph, END
 from agent.nodes import run_one_react_step
 
-MAX_STEPS = 20
+MAX_STEPS = 30
 
 
 class AgentState(TypedDict):
